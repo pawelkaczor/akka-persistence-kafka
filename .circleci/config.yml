@@ -4,31 +4,42 @@ jobs:
     environment:
       - JAVA_OPTS: "-XX:ReservedCodeCacheSize=256M -Xms1g -Xmx3g -Xss2m"
       - SBT_TEST_TIME_FACTOR: "2"
-    machine: true
+      - SBT_VERSION: 1.4.0
+    docker:
+      - image: openjdk:8
+        auth:
+          username: newion
+          password: $DOCKERHUB_PASSWORD
     steps:
+      - run: echo 'export ARTIFACT_BUILD=$CIRCLE_PROJECT_REPONAME-$CIRCLE_BUILD_NUM.zip' >> $BASH_ENV
       - run:
+          name: Get sbt binary
           command: |
-            sudo apt-get update -qq
-            sudo apt-get install -y software-properties-common
-            sudo apt-get install -y openjdk-8-jdk
-            sudo apt-get update -qq
-            sudo apt-get install -y maven git
-            echo "deb https://dl.bintray.com/sbt/debian /" | sudo tee -a /etc/apt/sources.list.d/sbt.list
-            sudo apt-key adv --keyserver hkp://keyserver.ubuntu.com:80 --recv 2EE0EA64E40A89B84B2DF73499E82A75642AC823
-            sudo apt-get update -qq
-            sudo apt-get install sbt
+            apt update && apt install -y curl
+            curl -L -o sbt-$SBT_VERSION.deb https://dl.bintray.com/sbt/debian/sbt-$SBT_VERSION.deb
+            dpkg -i sbt-$SBT_VERSION.deb
+            rm sbt-$SBT_VERSION.deb
+            apt-get update
+            apt-get install -y python-pip git
+            pip install awscli
+            apt-get clean && apt-get autoclean
           no_output_timeout: 30m
       - checkout
       - restore_cache:
-          key: scala-library-dependencies-{{ checksum "build.sbt" }}
+          key: sbt-cache
       - run:
+          name: Compile and test
           command: |
             sbt ++"2.12.10" test
             sbt ++"2.13.1" test
           no_output_timeout: 1h
       - save_cache:
-          paths: [ "~/.sbt/boot", "~/.ivy2/cache", "~/.cache/coursier" ]
-          key: scala-library-dependencies-{{ checksum "build.sbt" }}
+          key: sbt-cache
+          paths:
+            - "~/.cache/coursier"
+            - "~/.ivy2/cache"
+            - "~/.sbt"
+            - "~/.m2"
 workflows:
   version: 2
   build_and_test:
