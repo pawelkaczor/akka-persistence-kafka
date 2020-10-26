@@ -19,17 +19,12 @@ class JournalSequence(
   ): Future[Long] =
     Future { readLowestSequenceNr(persistenceId, fromSequenceNr) }
 
-  def readHighestSequenceNrAsync(persistenceId: PersistenceId, fromSequenceNr: Option[Long] = None)(implicit
-      ec: ExecutionContext
-  ): Future[Long] =
-    Future { readHighestSequenceNr(persistenceId, fromSequenceNr) }
-
   def readLowestSequenceNr(persistenceId: PersistenceId, toSequenceNr: Option[Long] = None): Long = {
     val consumer = consumerSettings.createKafkaConsumer()
     try {
-      val topic         = topicPrefix + journalTopicResolver.resolve(persistenceId).asString
+      val topic = topicPrefix + journalTopicResolver.resolve(persistenceId).asString
       val partitionSize = consumer.partitionsFor(topic).asScala.size
-      val partitonId    = journalPartitionResolver.resolve(partitionSize, persistenceId).value
+      val partitonId = journalPartitionResolver.resolve(partitionSize, persistenceId).value
 
       val tp = new TopicPartition(topic, partitonId)
       consumer.assign(List(tp).asJava)
@@ -43,15 +38,20 @@ class JournalSequence(
 
   }
 
+  def readHighestSequenceNrAsync(pId: PersistenceId, fromSequenceNr: Option[Long] = None)(implicit
+      ec: ExecutionContext
+  ): Future[Long] =
+    Future { readHighestSequenceNr(pId, fromSequenceNr) }
+
   def readHighestSequenceNr(
       persistenceId: PersistenceId,
       fromSequenceNr: Option[Long] = None
   ): Long = {
     val consumer = consumerSettings.createKafkaConsumer()
     try {
-      val topic         = topicPrefix + journalTopicResolver.resolve(persistenceId).asString
+      val topic = topicPrefix + journalTopicResolver.resolve(persistenceId).asString
       val partitionSize = consumer.partitionsFor(topic).asScala.size
-      val partitonId    = journalPartitionResolver.resolve(partitionSize, persistenceId).value
+      val partitonId = journalPartitionResolver.resolve(partitionSize, persistenceId).value
 
       val tp = new TopicPartition(topic, partitonId)
       consumer.assign(List(tp).asJava)

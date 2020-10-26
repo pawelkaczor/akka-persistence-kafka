@@ -6,7 +6,6 @@ import akka.kafka.{ ConsumerSettings, ProducerSettings, Subscriptions }
 import akka.persistence.snapshot.SnapshotStore
 import akka.persistence.{ SelectedSnapshot, SnapshotMetadata, SnapshotSelectionCriteria }
 import akka.serialization.SerializationExtension
-import akka.stream.ActorMaterializer
 import akka.stream.scaladsl.{ Sink, Source }
 import com.github.j5ik2o.akka.persistence.kafka.journal.{ JournalSequence, PersistenceId }
 import com.github.j5ik2o.akka.persistence.kafka.resolver.{ KafkaPartitionResolver, KafkaTopicResolver }
@@ -14,12 +13,7 @@ import com.typesafe.config.Config
 import net.ceedubs.ficus.Ficus._
 import org.apache.kafka.clients.producer.ProducerRecord
 import org.apache.kafka.common.TopicPartition
-import org.apache.kafka.common.serialization.{
-  ByteArrayDeserializer,
-  ByteArraySerializer,
-  StringDeserializer,
-  StringSerializer
-}
+import org.apache.kafka.common.serialization.{ ByteArrayDeserializer, ByteArraySerializer, StringDeserializer, StringSerializer }
 
 import scala.collection.immutable
 import scala.concurrent.Future
@@ -28,7 +22,7 @@ import scala.jdk.CollectionConverters._
 
 object KafkaSnapshotStore {
 
-  type RangeDeletions  = Map[String, SnapshotSelectionCriteria]
+  type RangeDeletions = Map[String, SnapshotSelectionCriteria]
   type SingleDeletions = Map[String, List[SnapshotMetadata]]
 
 }
@@ -36,41 +30,13 @@ object KafkaSnapshotStore {
 class KafkaSnapshotStore(config: Config) extends SnapshotStore {
   import KafkaSnapshotStore._
   import context.dispatcher
-  implicit val system: ActorSystem    = context.system
-  implicit val mat: ActorMaterializer = ActorMaterializer()
-
-  private val producerConfig = config.getConfig("producer")
-  private val consumerConfig = config.getConfig("consumer")
-
+  implicit val system: ActorSystem = context.system
   val ignoreOrphan = false
-
   protected val producerSettings: ProducerSettings[String, Array[Byte]] =
     ProducerSettings(producerConfig, new StringSerializer, new ByteArraySerializer)
   protected val producer = producerSettings.createKafkaProducer()
-
   protected val consumerSettings: ConsumerSettings[String, Array[Byte]] =
     ConsumerSettings(consumerConfig, new StringDeserializer, new ByteArrayDeserializer)
-
-  protected def resolveTopic(persistenceId: PersistenceId): String =
-    config.as[String]("topic-prefix") + journalTopicResolver.resolve(persistenceId).asString
-
-  protected def resolvePartitionSize(persistenceId: PersistenceId): Int = {
-    val topic = resolveTopic(persistenceId)
-    producer.partitionsFor(topic).asScala.size
-  }
-
-  protected def resolvePartition(persistenceId: PersistenceId): Int = {
-    val partitionSize = resolvePartitionSize(persistenceId)
-    journalPartitionResolver.resolve(partitionSize, persistenceId).value
-  }
-
-  private var rangeDeletions: RangeDeletions   = Map.empty.withDefaultValue(SnapshotSelectionCriteria.None)
-  private var singleDeletions: SingleDeletions = Map.empty.withDefaultValue(Nil)
-
-  private val serialization = SerializationExtension(context.system)
-
-  private val dynamicAccess: DynamicAccess = system.asInstanceOf[ExtendedActorSystem].dynamicAccess
-
   protected val journalTopicResolver: KafkaTopicResolver = {
     val className = config
       .as[String]("topic-resolver-class-name")
@@ -81,7 +47,6 @@ class KafkaSnapshotStore(config: Config) extends SnapshotStore {
       )
       .getOrElse(throw new ClassNotFoundException(className))
   }
-
   protected val journalPartitionResolver: KafkaPartitionResolver = {
     val className = config
       .as[String]("partition-resolver-class-name")
@@ -92,18 +57,23 @@ class KafkaSnapshotStore(config: Config) extends SnapshotStore {
       )
       .getOrElse(throw new ClassNotFoundException(className))
   }
-
-  override def postStop(): Unit = {
-    producer.close()
-    super.postStop()
-  }
-
   protected val journalSequence = new JournalSequence(
     consumerSettings,
     config.as[String]("topic-prefix"),
     journalTopicResolver,
     journalPartitionResolver
   )
+  private val producerConfig = config.getConfig("producer")
+  private val consumerConfig = config.getConfig("consumer")
+  private val serialization = SerializationExtension(context.system)
+  private val dynamicAccess: DynamicAccess = system.asInstanceOf[ExtendedActorSystem].dynamicAccess
+  private var rangeDeletions: RangeDeletions = Map.empty.withDefaultValue(SnapshotSelectionCriteria.None)
+  private var singleDeletions: SingleDeletions = Map.empty.withDefaultValue(Nil)
+
+  override def postStop(): Unit = {
+    producer.close()
+    super.postStop()
+  }
 
   override def saveAsync(metadata: SnapshotMetadata, snapshot: Any): Future[Unit] = {
     log.debug(s"saveAsync($metadata, $snapshot): start")
@@ -127,43 +97,34 @@ class KafkaSnapshotStore(config: Config) extends SnapshotStore {
       .map(_ => ())
   }
 
-  override def loadAsync(
-      persistenceId: String,
-      criteria: SnapshotSelectionCriteria
-  ): Future[Option[SelectedSnapshot]] = {
-    val singleDeletions = this.singleDeletions
-    val rangeDeletions  = this.rangeDeletions
+  protected def resolvePartition(persistenceId: PersistenceId): Int = {
+    val partitionSize = resolvePartitionSize(persistenceId)
+    journalPartitionResolver.resolve(partitionSize, persistenceId).value
+  }
 
-    for {
-      highest <-
-        if (ignoreOrphan)
-          journalSequence.readHighestSequenceNrAsync(PersistenceId(persistenceId))
-        else
-          Future.successful(Long.MaxValue)
-      adjusted =
-        if (
-          ignoreOrphan &&
-          highest < criteria.maxSequenceNr &&
-          highest > 0L
-        ) criteria.copy(maxSequenceNr = highest)
-        else criteria
-      // highest  <- Future.successful(Long.MaxValue)
-      // adjusted = criteria
-      snapshot <- {
-        // if timestamp was unset on delete, matches only on same sequence nr
-        def matcher(snapshot: SnapshotRow): Boolean =
-          snapshot.matches(adjusted) &&
-          !snapshot.matches(rangeDeletions(persistenceId)) &&
-          !singleDeletions(persistenceId).contains(snapshot.metadata) &&
-          !singleDeletions(persistenceId)
-            .filter(_.timestamp == 0L)
-            .map(_.sequenceNr)
-            .contains(snapshot.metadata.sequenceNr)
-        load(PersistenceId(persistenceId), matcher).map(sOpt =>
-          sOpt.map { s => SelectedSnapshot(s.metadata, s.payload) }
-        )
-      }
-    } yield snapshot
+  protected def resolvePartitionSize(persistenceId: PersistenceId): Int = {
+    val topic = resolveTopic(persistenceId)
+    producer.partitionsFor(topic).asScala.size
+  }
+
+  protected def resolveTopic(persistenceId: PersistenceId): String =
+    config.as[String]("topic-prefix") + journalTopicResolver.resolve(persistenceId).asString
+
+  override def loadAsync(persistenceId: String, criteria: SnapshotSelectionCriteria): Future[Option[SelectedSnapshot]] = {
+    val singleDeletions = this.singleDeletions
+    val rangeDeletions = this.rangeDeletions
+
+    def matcher(snapshot: SnapshotRow): Boolean =
+      snapshot.matches(criteria) &&
+      !snapshot.matches(rangeDeletions(persistenceId)) &&
+      !singleDeletions(persistenceId).contains(snapshot.metadata) &&
+      !singleDeletions(persistenceId)
+        .filter(_.timestamp == 0L)
+        .map(_.sequenceNr)
+        .contains(snapshot.metadata.sequenceNr)
+
+    // if timestamp was unset on delete, matches only on same sequence nr
+    load(PersistenceId(persistenceId), matcher).map(sOpt => sOpt.map { s => SelectedSnapshot(s.metadata, s.payload) })
   }
 
   private def load(persistenceId: PersistenceId, matcher: SnapshotRow => Boolean): Future[Option[SnapshotRow]] = {
